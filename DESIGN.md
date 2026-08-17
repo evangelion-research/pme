@@ -1,8 +1,10 @@
 # pme — the Package Manager for Emerald
 
-**Status:** design. Nothing here is implemented yet.
+**Status:** design. Nothing in pme itself is implemented yet — but its one hard
+prerequisite, the Emerald module system, has shipped (see §0).
 **Target language:** Python 3.11+ (chosen for iteration speed; pme is I/O-bound, not CPU-bound).
 **Distribution model:** central registry.
+**Tracks emerald at:** `1f683be` ("module system").
 
 pme is to [Emerald](https://github.com/evangelion-research/emerald) what cargo is to Rust:
 it resolves dependencies, materializes them into a local cache, and drives `emeraldc`
@@ -11,84 +13,115 @@ replacement for it.
 
 ---
 
-## 0. Prerequisite: Emerald needs a module system
+## 0. Prerequisite: the Emerald module system — **done**
 
 pme cannot exist in a useful form until the language can name code in another file.
-Today it cannot:
+It now can. `emerald@1f683be` added `src/module.c`, `docs/modules.md`, and a
+`tests/imports/` golden suite (22 cases, `task test:imports`, included in `task test`).
+The upstream doc is authoritative; this section records only what pme depends on.
 
-- `src/lexer.c` keyword table has no `import`/`from`/`as`.
-- `src/main.c` accepts exactly one `file.rald`, emits one `.gen.c`, and invokes `cc` once.
-- `src/check.c` resolves all top-level `def`/`type` in a single flat namespace, and
-  `docs/grammar.md` requires type aliases to be declared before use — both single-unit
-  assumptions.
-
-So Phase 0 is compiler work, tracked here because pme's entire design depends on its
-outcome.
-
-### 0.1 Syntax
-
-Python-flavored, to match the rest of the language:
+### 0.1 Syntax (as shipped)
 
 ```
-import strings                  # module object; strings.split(...)
+import strings                       # module object; strings.split(...)
 import strings as s
+import text.strings                  # dotted path — binds `strings`, the LAST component
 from strings import split, join
+from strings import join as concat
 ```
 
-Module paths are dotted and map to directories: `import text.strings` → `text/strings.rald`.
+Imports are legal only at the **top level** of a module. There are no package objects:
+`import a.b.c` binds `c`, and `a` alone names nothing — use `as` when the last component
+isn't the name you want.
 
-### 0.2 Resolution
+### 0.2 Resolution (as shipped)
 
-A module path resolves to a file by searching, **in order**:
+A dotted path maps to a file under each search root, **in this order**:
 
 1. the directory of the importing file,
-2. the project's `src/` root,
-3. each `-I <dir>` passed on the command line, in the order given.
+2. the project's `src/` root — found by walking **up from the entry file's directory**,
+3. each `-I <dir>` given on the command line, in the order given.
 
-Rule: the first hit wins; a later `-I` never shadows an earlier one. Diagnose ambiguity
-across *the same* `-I` root as an error, not a silent pick.
+The first root with a hit wins; a later `-I` never shadows an earlier one.
 
-### 0.3 The compiler contract
+Two details that differ from the original sketch and that pme must design around:
 
-This is the only interface between pme and `emeraldc`, and it should be designed first
-and then frozen:
+- **Both spellings are accepted.** `text.strings` matches `text/strings.rald` *or*
+  `text.strings.rald`. A single root offering both is `E_IMPORT_AMBIGUOUS` — an error,
+  not a silent pick. Package tarballs should therefore never ship both spellings of one
+  path; `pme publish` can cheaply check this and reject it before upload (see §7.3).
+- **The `src/` root is the *entry's*, not each module's.** A dependency's own `src/` is
+  not implicitly a root. So a store package whose internal layout is
+  `src/a/b.rald` importing a sibling-of-root `util` resolves only if pme passes that
+  package's `src/` as an explicit `-I`. This is what §5.2 already does, but it is now a
+  correctness requirement rather than a convenience.
+
+Module identity is the file's **canonical path**, so the same file reached through two
+different roots is one module, loaded once. Diamonds in the import graph cost nothing.
+
+### 0.3 The compiler contract — frozen
 
 ```
 emeraldc [-I <dir>]... [--json] [-o OUT] <entry>.rald
 ```
 
+Confirmed against `src/main.c`: `-I` (both `-I dir` and `-Idir`) is repeatable and
+order-preserving, `-o` sets the output path, `--json` applies to any mode. The other
+flags are `--emit-tokens`, `--emit-ast`, `--check`, `--emit-c`, `--keep-c`.
+
+`--emit-tokens` and `--emit-ast` are deliberately **per-file** views and do not follow
+an import. `--check`, `--emit-c`, and a full build operate on the linked program — so
+`pme check` (should it ever exist) and `pme build` both see the whole graph.
+
 pme's job reduces to: compute the ordered list of `-I` roots, then exec the compiler.
 pme never parses `.rald` source. It never rewrites imports. It never generates code.
+That seam held through implementation and should stay frozen.
 
-### 0.4 Checker and codegen
+### 0.4 Linking, exports, and mangling (as shipped)
 
-- Per-module symbol tables; a module's top-level names are private unless exported.
-  Cheapest export rule that fits the language: **a leading underscore means private,
-  everything else is exported.** No new keyword needed.
-- Import cycles are an error with a real diagnostic code, not a hang.
-- Codegen mangles top-level symbols as `<module>__<name>` so two packages can both
-  define `parse`.
-- Start by concatenating all modules into one translation unit. It preserves the
-  existing GC shadow-stack setup and avoids designing a linking story on day one.
-  Split into separate `.gen.c` files later, when compile times justify it.
+- **Export rule:** a leading underscore means private, everything else is exported —
+  for top-level `def`s, `type` aliases, and globals alike. No new keyword, as planned.
+- **Linking is a rename pass in `src/module.c`.** The checker and codegen still see one
+  flat `Program`, ordered dependencies-first; they know nothing about modules.
+- **Mangling** is `<module>__<name>`, with dots flattened to underscores:
+  `strings.split` → `strings__split`, `text.strings.split` → `text_strings__split`.
+  Two packages can each define `parse`. The **entry module is never renamed**.
+- Rewritten AST nodes keep the spelling the user wrote, and diagnostics quote *that* —
+  so pme never needs to demangle a symbol before showing an error to a user.
+- All modules are concatenated into **one translation unit**, preserving the GC
+  shadow-stack setup. Splitting into per-module `.gen.c` is a later change; pme's build
+  step (§5.2) is unaffected either way, since it is one `emeraldc` exec regardless.
+- Module init order follows link order: an imported module's top-level statements run
+  before its importer's.
 
-### 0.5 New diagnostics
+One language-level limit worth knowing when writing packages: **types must cross a
+module boundary via `from`-import.** `m.T` in a *type* position is rejected, because the
+type grammar has no qualified names. Values and functions work either way.
 
-Following `docs/diagnostics.md` conventions (stable code, `file:line:column`, `--json`):
+### 0.5 Import diagnostics (as shipped)
 
 | code | meaning |
 |---|---|
-| `E_IMPORT_NOT_FOUND` | module path resolved to no file on the search path |
-| `E_IMPORT_CYCLE` | import graph contains a cycle; note lists the cycle |
-| `E_IMPORT_PRIVATE` | imported name exists but is private (leading `_`) |
+| `E_IMPORT_NOT_FOUND` | module path resolved to no file on the search path; notes list every root searched |
+| `E_IMPORT_CYCLE` | import graph contains a cycle; notes list the modules on it |
+| `E_IMPORT_PRIVATE` | imported name exists but is private (leading `_`) — whether via `from m import _x` or `m._x` |
 | `E_IMPORT_NAME` | imported name does not exist in that module |
-| `E_IMPORT_AMBIGUOUS` | two files under one root claim the same module path |
+| `E_IMPORT_AMBIGUOUS` | one root offers both `a/b.rald` and `a.b.rald`; notes list both candidates |
+| `E_IMPORT_REDEFINE` | an import binding collides with a local top-level name or an earlier import |
+| `E_IMPORT_MODULE_VALUE` | a module object used as a value, or assigned to; only `m.<name>` is legal |
 
-### 0.6 Definition of done for Phase 0
+The last two are new relative to the original sketch. All carry `file:line:column`, quote
+the source line, and are available under `--json`.
 
-`tests/imports/` golden suite wired into `task test`, covering: basic import, aliased
-import, `from`-import, transitive imports, private-name rejection, cycle rejection,
-and shadowing precedence across two `-I` roots.
+Note for §8: import errors are emitted with the existing `syntax` **kind**, not a new
+`import` kind. The compiler's `DiagKind` is still exactly `syntax | type | internal`.
+
+### 0.6 Definition of done — met
+
+`tests/imports/` covers basic, aliased, `from`-import, dotted, transitive, same-file
+identity, `src/`-root resolution, `-I` precedence and shadowing, module state, and
+symbol collision across modules; plus twelve `bad_*` cases compiled with `--check`
+whose diagnostics are the golden output. `task test:imports` runs the stage alone.
 
 ---
 
@@ -210,8 +243,11 @@ Properties that make this the right call here:
   to test.
 - The implementation is ~100 lines, versus a solver you will spend weeks debugging.
 - Only one version of a package is ever selected. **pme does not support multiple
-  major versions of the same package in one build** — the flat C symbol namespace after
-  mangling can't express it anyway. Diagnose the conflict clearly instead.
+  major versions of the same package in one build.** This is now a hard constraint, not
+  a preference: mangling is `<module>__<name>` keyed on the *dotted module path* only
+  (§0.4), with no version component, so two majors of `strings` would emit colliding
+  `strings__split` symbols into one translation unit. Diagnose the conflict clearly
+  instead.
 
 `pme update` is the escape hatch: it bumps the recorded minimums in the manifest to the
 latest compatible release, then re-resolves.
@@ -258,6 +294,17 @@ compute -I roots in dependency order
 exec: emeraldc -I <root1> -I <root2> … -o target/<binname> src/main.rald
 ```
 
+Each `-I` root is the package's **`src/` directory**, not its store root — a dependency's
+own `src/` is never an implicit root (§0.2). Order matters and is preserved by the
+compiler, so pme fixes it deterministically: dependency order, dependencies before
+dependents, ties broken by name.
+
+One shadowing hazard to keep in mind: the entry project's `src/` is searched *before*
+every `-I`, so an app file named `strings.rald` silently wins over the `strings` package.
+That is the compiler's documented precedence and pme should not fight it, but `pme add`
+can warn when a new package name collides with a top-level module already in the
+project's `src/`.
+
 Output goes to `target/`. `pme build --json` passes `--json` through to `emeraldc` and
 emits pme's *own* errors in the same shape (see §8), so one JSON stream describes the
 whole build.
@@ -279,7 +326,7 @@ Keep it small. Every command takes `--json` and `-q`.
 | `pme remove <pkg>` | inverse of add |
 | `pme install` | resolve + fetch + verify; writes lock. `--locked` for CI |
 | `pme update [pkg]` | raise minimums to latest compatible; re-resolve |
-| `pme build [--release]` | §5.2. `--release` passes optimization flags through to `emeraldc` |
+| `pme build [--release]` | §5.2. `--release` is a placeholder: `emeraldc` has no optimization flag today, so pme must either add one upstream or pass `CFLAGS` to the `cc` invocation |
 | `pme run [-- args]` | build, then exec the binary |
 | `pme test` | build with dev-deps and run the test target (see §9) |
 | `pme tree` | dependency tree with selected versions |
@@ -339,6 +386,8 @@ lockfiles but is never newly selected.
 ```
 pme publish
   ├ validate manifest (name, semver, license, no path deps, [lib] present)
+  ├ reject a tree with both `a/b.rald` and `a.b.rald` → would be E_IMPORT_AMBIGUOUS
+    for every consumer (§0.2)
   ├ verify version not already published        → immutable, no overwrites ever
   ├ build the tarball from git-tracked files only, honoring .pmeignore
   ├ normalize: sorted entries, fixed mtime/uid/gid/mode → byte-reproducible tarball
@@ -381,7 +430,10 @@ error[E_RESOLVE_MAJOR_CONFLICT]: cannot select a single version of `unicode`
  "file":"emerald.toml","message":"…","notes":[{"label":"path","value":"…"}]}
 ```
 
-`kind` extends the compiler's set with `manifest`, `resolve`, `registry`, `io`.
+The compiler's set is currently exactly `syntax`, `type`, `internal` — import errors
+reuse `syntax` rather than introducing a kind of their own. pme extends that set with
+`manifest`, `resolve`, `registry`, `io`; the four are disjoint from the compiler's, so a
+consumer can attribute every object in a merged `--json` stream to one producer.
 
 ---
 
@@ -456,7 +508,7 @@ survive unchanged.
 
 | # | milestone | done when |
 |---|---|---|
-| 0 | **imports in emerald** | `tests/imports/` green; `-I` frozen |
+| 0 | ~~**imports in emerald**~~ ✅ | **done** — `tests/imports/` green in `task test`; `-I` contract frozen (`emerald@1f683be`) |
 | 1 | manifest + lockfile + semver | round-trip parse/write, property tests on semver |
 | 2 | MVS resolver | resolves against a fake in-memory index, conflicts reported |
 | 3 | store + build | `pme build` works with `path` deps only — no network yet |
@@ -465,20 +517,32 @@ survive unchanged.
 | 6 | polish | `pme test`, `pme update`, `--json` everywhere, `pme verify`, docs |
 
 Milestone 3 is the first genuinely useful build, and it needs no registry at all —
-`path` dependencies alone prove the whole `-I` pipeline end to end.
+`path` dependencies alone prove the whole `-I` pipeline end to end. With milestone 0
+landed, **milestone 1 is the current front of work**, and milestone 3 is now unblocked
+by anything upstream.
 
 ---
 
 ## 12. Open questions
 
 1. **Stdlib boundary.** Do `strings`/`json`/`math` ship inside `emeraldc`, or as pme
-   packages? This shapes the entire ecosystem and should be decided before milestone 5.
-   Recommendation: a small set compiled into the compiler, everything else in packages.
+   packages? Still open, and now the *only* remaining language-shaped blocker: the
+   module system gives a package no way to be found without an explicit `-I`, so a
+   "stdlib as packages" answer means every build carries stdlib entries in its lockfile.
+   Should be decided before milestone 5. Recommendation unchanged: a small set compiled
+   into the compiler, everything else in packages.
 2. **Compiler version pinning.** Should `emerald = ">=0.2.0"` be enforced by pme
-   invoking `emeraldc --version`? (Requires adding `--version` to the driver — it has
-   no such flag today.)
+   invoking `emeraldc --version`? Still open — verified against `src/main.c` at
+   `1f683be`: the driver accepts `--emit-tokens`, `--emit-ast`, `--check`, `--emit-c`,
+   `--json`, `--keep-c`, `-o`, `-I`, and nothing else. `--version` still has to be added
+   upstream before `E_RESOLVE_COMPILER` (§4) can actually fire.
 3. **`emerald-lsp` integration.** The LSP must read `emerald.lock` and pass the same
    `-I` roots, or cross-package go-to-definition breaks. Worth designing alongside
    milestone 3.
 4. **Prereleases.** MVS + prereleases interact badly. Simplest answer: prereleases are
    never selected automatically, only by exact pin.
+5. **Type re-export.** A package can only expose a type through `from m import T`
+   (§0.4) — `m.T` in a type position is rejected. A package with a deep internal module
+   layout therefore has no way to surface its types from a single `lib.rald` façade
+   without redeclaring each alias. Tolerable at milestone 3; revisit if package authors
+   hit it.
