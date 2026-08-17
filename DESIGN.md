@@ -4,7 +4,11 @@
 prerequisite, the Emerald module system, has shipped (see §0).
 **Target language:** Python 3.11+ (chosen for iteration speed; pme is I/O-bound, not CPU-bound).
 **Distribution model:** central registry.
-**Tracks emerald at:** `1f683be` ("module system").
+**Tracks emerald at:** `1facafe` (HEAD, 2026-08-17). The module system itself is
+exactly as it shipped at `1f683be`; everything landed since — the functional core
+(lambdas, thunks, closures, tail-call optimization), proof mode (`--proof`), the
+ray-tracer example, and the Phase-2 plan (`docs/SPEC_V2.md`) — left the resolution
+rules and the `-I` contract this design depends on untouched (see §0).
 
 pme is to [Emerald](https://github.com/evangelion-research/emerald) what cargo is to Rust:
 it resolves dependencies, materializes them into a local cache, and drives `emeraldc`
@@ -17,8 +21,10 @@ replacement for it.
 
 pme cannot exist in a useful form until the language can name code in another file.
 It now can. `emerald@1f683be` added `src/module.c`, `docs/modules.md`, and a
-`tests/imports/` golden suite (22 cases, `task test:imports`, included in `task test`).
-The upstream doc is authoritative; this section records only what pme depends on.
+`tests/imports/` golden suite (23 cases, `task test:imports`, included in `task test`).
+The suite is unchanged at HEAD (`1facafe`), so everything in this section was
+re-verified against the current tree, not just against `1f683be`. The upstream doc
+is authoritative; this section records only what pme depends on.
 
 ### 0.1 Syntax (as shipped)
 
@@ -65,9 +71,15 @@ different roots is one module, loaded once. Diamonds in the import graph cost no
 emeraldc [-I <dir>]... [--json] [-o OUT] <entry>.rald
 ```
 
-Confirmed against `src/main.c`: `-I` (both `-I dir` and `-Idir`) is repeatable and
-order-preserving, `-o` sets the output path, `--json` applies to any mode. The other
-flags are `--emit-tokens`, `--emit-ast`, `--check`, `--emit-c`, `--keep-c`.
+Confirmed against `src/main.c` at HEAD (`1facafe`): `-I` (both `-I dir` and `-Idir`)
+is repeatable and order-preserving, `-o` sets the output path, `--json` applies to
+any mode. The full flag set is now `--emit-tokens`, `--emit-ast`, `--check`,
+`--emit-c`, `--proof`, `--keep-c` — `--proof` (proof mode, §0.5) was added after
+`1f683be`; nothing pme consumes changed. `--version` still does not exist (§12 Q2).
+
+The full build compiles the generated C itself: `cc -std=c11 -O2 -I <src> …`,
+honoring `$CC` and `$EMERALD_SRC`. There is no debug/release switch to pass through
+(see §6), and no way for a driver to inject CFLAGS.
 
 `--emit-tokens` and `--emit-ast` are deliberately **per-file** views and do not follow
 an import. `--check`, `--emit-c`, and a full build operate on the linked program — so
@@ -114,14 +126,19 @@ The last two are new relative to the original sketch. All carry `file:line:colum
 the source line, and are available under `--json`.
 
 Note for §8: import errors are emitted with the existing `syntax` **kind**, not a new
-`import` kind. The compiler's `DiagKind` is still exactly `syntax | type | internal`.
+`import` kind. The compiler's `DiagKind` is still exactly `syntax | type | internal`
+(re-verified in `include/diag.h` at HEAD). Proof mode (`--check --proof`) adds an
+`E_PROOF_*` family (`E_PROOF_ANY`, `E_PROOF_PARTIAL`) that stays inside those three
+kinds; pme never passes `--proof`, so it never sees them.
 
 ### 0.6 Definition of done — met
 
 `tests/imports/` covers basic, aliased, `from`-import, dotted, transitive, same-file
 identity, `src/`-root resolution, `-I` precedence and shadowing, module state, and
 symbol collision across modules; plus twelve `bad_*` cases compiled with `--check`
-whose diagnostics are the golden output. `task test:imports` runs the stage alone.
+whose diagnostics are the golden output — 23 cases total, unchanged at HEAD.
+`task test:imports` runs the stage alone; `task test` runs all six stage suites
+(lexer, parser, check, proof, e2e, imports; 99 golden tests).
 
 ---
 
@@ -326,7 +343,7 @@ Keep it small. Every command takes `--json` and `-q`.
 | `pme remove <pkg>` | inverse of add |
 | `pme install` | resolve + fetch + verify; writes lock. `--locked` for CI |
 | `pme update [pkg]` | raise minimums to latest compatible; re-resolve |
-| `pme build [--release]` | §5.2. `--release` is a placeholder: `emeraldc` has no optimization flag today, so pme must either add one upstream or pass `CFLAGS` to the `cc` invocation |
+| `pme build [--release]` | §5.2. `--release` is a placeholder: `emeraldc` always compiles the generated C with `-O2` and exposes no debug/release switch (it honors `$CC`/`$EMERALD_SRC`), so pme passes the flag through as a no-op until upstream adds a distinction |
 | `pme run [-- args]` | build, then exec the binary |
 | `pme test` | build with dev-deps and run the test target (see §9) |
 | `pme tree` | dependency tree with selected versions |
@@ -431,9 +448,11 @@ error[E_RESOLVE_MAJOR_CONFLICT]: cannot select a single version of `unicode`
 ```
 
 The compiler's set is currently exactly `syntax`, `type`, `internal` — import errors
-reuse `syntax` rather than introducing a kind of their own. pme extends that set with
-`manifest`, `resolve`, `registry`, `io`; the four are disjoint from the compiler's, so a
-consumer can attribute every object in a merged `--json` stream to one producer.
+reuse `syntax` rather than introducing a kind of their own (re-verified in
+`include/diag.h` at HEAD; proof-mode `E_PROOF_*` errors stay inside those three
+kinds). pme extends that set with `manifest`, `resolve`, `registry`, `io`; the four
+are disjoint from the compiler's, so a consumer can attribute every object in a
+merged `--json` stream to one producer.
 
 ---
 
@@ -508,7 +527,7 @@ survive unchanged.
 
 | # | milestone | done when |
 |---|---|---|
-| 0 | ~~**imports in emerald**~~ ✅ | **done** — `tests/imports/` green in `task test`; `-I` contract frozen (`emerald@1f683be`) |
+| 0 | ~~**imports in emerald**~~ ✅ | **done** — `tests/imports/` green in `task test`; `-I` contract frozen, re-verified at `emerald@1facafe` |
 | 1 | manifest + lockfile + semver | round-trip parse/write, property tests on semver |
 | 2 | MVS resolver | resolves against a fake in-memory index, conflicts reported |
 | 3 | store + build | `pme build` works with `path` deps only — no network yet |
@@ -519,30 +538,41 @@ survive unchanged.
 Milestone 3 is the first genuinely useful build, and it needs no registry at all —
 `path` dependencies alone prove the whole `-I` pipeline end to end. With milestone 0
 landed, **milestone 1 is the current front of work**, and milestone 3 is now unblocked
-by anything upstream.
+by anything upstream. Since `1f683be` the module system has only been exercised
+harder: the typed ray tracer is a 13-module program, and the Phase-2 plan
+(`docs/SPEC_V2.md`) intends `import tensor` as the first real library — both run
+through exactly the `-I` pipeline pme will drive.
 
 ---
 
 ## 12. Open questions
 
 1. **Stdlib boundary.** Do `strings`/`json`/`math` ship inside `emeraldc`, or as pme
-   packages? Still open, and now the *only* remaining language-shaped blocker: the
-   module system gives a package no way to be found without an explicit `-I`, so a
-   "stdlib as packages" answer means every build carries stdlib entries in its lockfile.
-   Should be decided before milestone 5. Recommendation unchanged: a small set compiled
-   into the compiler, everything else in packages.
+   packages? Still open — the compiler still ships no stdlib, just sixteen builtins
+   (`print`, `len`, `range`, `str`, `int`, `sqrt`, `tan`, `rand`, `map`, `filter`,
+   `reduce`, `read_file`, `write_file`, `append_file`, `run`, `gc_stats`) — but
+   upstream has moved toward the recommendation below. The Phase-2 plan
+   (`docs/SPEC_V2.md` §7, "D-open") proposes the split explicitly: tensor primitives
+   that need special typing rules stay builtins, the derived ops become a `tensor`
+   module written in Emerald — a small set compiled in, everything else in
+   modules/packages, and the module system finally dogfooded by a real library.
+   Should still be decided before milestone 5.
 2. **Compiler version pinning.** Should `emerald = ">=0.2.0"` be enforced by pme
-   invoking `emeraldc --version`? Still open — verified against `src/main.c` at
-   `1f683be`: the driver accepts `--emit-tokens`, `--emit-ast`, `--check`, `--emit-c`,
-   `--json`, `--keep-c`, `-o`, `-I`, and nothing else. `--version` still has to be added
-   upstream before `E_RESOLVE_COMPILER` (§4) can actually fire.
+   invoking `emeraldc --version`? Still open — re-verified against `src/main.c` at HEAD
+   (`1facafe`): the driver accepts `--emit-tokens`, `--emit-ast`, `--check`, `--emit-c`,
+   `--json`, `--proof`, `--keep-c`, `-o`, `-I`, and nothing else. `--version` still has
+   to be added upstream before `E_RESOLVE_COMPILER` (§4) can actually fire. (The full
+   build honors `$CC` and `$EMERALD_SRC`, which pme could set if it ever needs to steer
+   the C toolchain.)
 3. **`emerald-lsp` integration.** The LSP must read `emerald.lock` and pass the same
    `-I` roots, or cross-package go-to-definition breaks. Worth designing alongside
-   milestone 3.
+   milestone 3. Unchanged upstream: no LSP work yet, but the compiler's `--json`
+   diagnostics are explicitly built for a tool/LLM repair loop (`docs/diagnostics.md`),
+   the same consumer a shared lockfile serves.
 4. **Prereleases.** MVS + prereleases interact badly. Simplest answer: prereleases are
    never selected automatically, only by exact pin.
 5. **Type re-export.** A package can only expose a type through `from m import T`
-   (§0.4) — `m.T` in a type position is rejected. A package with a deep internal module
-   layout therefore has no way to surface its types from a single `lib.rald` façade
-   without redeclaring each alias. Tolerable at milestone 3; revisit if package authors
-   hit it.
+   (§0.4) — `m.T` in a type position is rejected (re-verified in `docs/modules.md` at
+   HEAD). A package with a deep internal module layout therefore has no way to surface
+   its types from a single `lib.rald` façade without redeclaring each alias. Tolerable
+   at milestone 3; revisit if package authors hit it.
