@@ -1,4 +1,4 @@
-# pme — the package manager for Emerald
+# pme — the package manager & build system for Emerald
 
 `pme` is to [Emerald](https://github.com/evangelion-research/emerald) what cargo
 is to Rust: it resolves dependencies, materializes them into a local
@@ -6,6 +6,14 @@ content-addressed store, and drives `emeraldc` with the right module search
 path. It is a *driver* around the compiler — it never parses `.rald`, never
 rewrites imports, and never generates code. The whole contract with the
 compiler is one frozen flag: ordered `-I` roots.
+
+pme is two tools with one seam:
+
+- the **package manager** — resolve, fetch, verify, publish (`DESIGN.md`);
+- the **build system** — compute the search path, detect change, drive
+  `emeraldc`, cache artifacts, forward diagnostics (`BUILD.md`).
+
+Prior art for both is collected in [`REFERENCES.md`](REFERENCES.md).
 
 **Status:** design. Nothing in pme itself is implemented yet. Its one hard
 prerequisite — the Emerald module system — shipped at `emerald@1f683be` and
@@ -19,10 +27,14 @@ proof mode, and the ray-tracer example — left the resolution rules and the
 ## Why Python
 
 pme is I/O-bound — network fetches, tarball extraction, subprocess exec of
-`emeraldc` — not CPU-bound. Python's stdlib (`tomllib`) plus two small
-dependencies (`tomlkit` for comment-preserving manifest edits, `httpx` for
-HTTP) cover everything; the hot path stays in the C compiler. Distribution is
-`pipx install pme` / `uv tool install pme`.
+`emeraldc` — not CPU-bound. Python's stdlib (`tomllib`) plus three small
+dependencies (`click` for the CLI, `tomlkit` for comment-preserving manifest
+edits, `httpx` for HTTP) cover everything; the hot path stays in the C compiler.
+Distribution is `pipx install pme` / `uv tool install pme`.
+
+The scaffold's `pyproject.toml`/`main.py` are close to this (Python 3.13 +
+`click` + `requests`); they are reconciled to 3.11+ / `httpx` at milestone 1 —
+see `DESIGN.md` §10.0.
 
 ## Planned CLI
 
@@ -94,8 +106,9 @@ never does analysis, the LSP never does resolution.
 
 ## Links
 
-- pme spec: `evangelion-research/pme` (`DESIGN.md`)
+- Package-manager + overall design: [`DESIGN.md`](DESIGN.md)
+- Build-system design + route: [`BUILD.md`](BUILD.md)
+- Prior art: [`REFERENCES.md`](REFERENCES.md)
+- pme spec companion: `evangelion-research/pme` (`DESIGN.md`)
 - Emerald compiler: `evangelion-research/emerald`
-- This repo: the Emerald LSP design, with the pme Python implementation plan
-  in the appendix — see `DESIGN.md`
 - License: MIT — see `LICENSE`

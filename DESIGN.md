@@ -4,6 +4,8 @@
 prerequisite, the Emerald module system, has shipped (see §0).
 **Target language:** Python 3.11+ (chosen for iteration speed; pme is I/O-bound, not CPU-bound).
 **Distribution model:** central registry.
+**Two tools, one seam:** pme is a **package manager** (this document) *and* a
+**build system** (`BUILD.md`). Prior art for both is in `REFERENCES.md`.
 **Tracks emerald at:** `1facafe` (HEAD, 2026-08-17). The module system itself is
 exactly as it shipped at `1f683be`; everything landed since — the functional core
 (lambdas, thunks, closures, tail-call optimization), proof mode (`--proof`), the
@@ -473,20 +475,39 @@ That needs no language change. A real assertion library can ship later as a pack
 
 ## 10. Implementation in Python
 
+### 10.0 Stack — reconciled
+
+The scaffold (`pyproject.toml`, `main.py`, `uv.lock`) currently says
+`requires-python >=3.13`, `click`, and `requests`; the rest of this document
+says 3.11+, `argparse`, `tomlkit`+`httpx`. Reconcile to the following **at
+milestone 1** (a config edit, not new code):
+
+- **Python 3.11+** (`requires-python = ">=3.11"`; `tomllib` is stdlib there).
+  Lower the scaffold's `>=3.13` unless a real 3.13-only need appears.
+- **CLI: `click`** — already the scaffold's choice in `main.py`; subcommand
+  dispatch + `--json`/`-q` + exit codes are cleaner than hand-rolled `argparse`.
+- **HTTP: `httpx`** — replace `requests` for timeouts/retries/streaming.
+- **TOML: `tomllib`** (read) **+ `tomlkit`** (write, comment-preserving).
+
+Update `pyproject.toml` accordingly; the lockfile regenerates with `uv`.
+
 ### 10.1 Layout
 
 ```
 pme/
   pyproject.toml            # hatchling; console_scripts: pme = pme.cli:main
   src/pme/
-    cli.py                  # argparse dispatch, exit codes, --json plumbing
+    cli.py                  # click dispatch, exit codes, --json plumbing
     manifest.py             # emerald.toml parse/validate  (tomllib + tomlkit)
     lockfile.py             # emerald.lock read/write, deterministic ordering
     semver.py               # parse/compare/constraints — hand-rolled, ~150 lines
     resolve.py              # MVS
     registry.py             # index fetch, tarball download, publish  (httpx)
     store.py                # content-addressed cache, atomic extract, verify
-    build.py                # -I computation, emeraldc invocation, diagnostic passthrough
+    plan.py                 # build plan: targets + ordered -I roots (BUILD.md §1.2)
+    fingerprint.py          # content-hash change detection (BUILD.md §4)
+    build.py                # emeraldc invocation, parallelism, diagnostic passthrough
+    cache.py                # local/remote artifact cache (BUILD.md §10)
     diagnostics.py          # the §8 shapes, human + JSON renderers
     errors.py               # PmeError hierarchy → exit codes
   tests/                    # pytest
@@ -496,9 +517,12 @@ pme/
 
 - `tomllib` (stdlib, 3.11+) to read; **`tomlkit`** to write, because `pme add` must
   preserve the user's comments and formatting.
-- `httpx` for HTTP (timeouts and retries that actually work).
+- `click` for CLI dispatch (subcommands, `--json`, `-q`, exit codes).
+- `httpx` for HTTP (timeouts and retries that actually work) — replaces the
+  scaffold's `requests`.
 - No `packaging` — Emerald semver is stricter and simpler than PEP 440; hand-roll it.
-- `pytest` + `pytest-httpx` for tests.
+- `pytest` + `pytest-httpx` for tests; `hypothesis` for property tests on
+  semver + MVS.
 
 ### 10.3 Non-negotiables
 
@@ -511,6 +535,10 @@ pme/
 - **No network in `pme build`** when the lock is satisfied by the store. Builds must
   work offline.
 - **Never `shell=True`**. `emeraldc` is invoked with an argv list.
+- **Fingerprint by content, not mtime** — change detection hashes file contents
+  so identical source always produces an identical decision (`BUILD.md` §4).
+- **The build plan is a pure function** of (manifest, lockfile, flags) and is
+  serialized for tooling (`BUILD.md` §1.2).
 
 ### 10.4 Shipping
 
@@ -542,6 +570,53 @@ by anything upstream. Since `1f683be` the module system has only been exercised
 harder: the typed ray tracer is a 13-module program, and the Phase-2 plan
 (`docs/SPEC_V2.md`) intends `import tensor` as the first real library — both run
 through exactly the `-I` pipeline pme will drive.
+
+### 11.1 Detailed implementation route
+
+The build-system half is `BUILD.md` §11 (steps B1–B6). The package-manager half:
+
+**M1 — manifest + lockfile + semver** *(current front of work)*
+1. `semver.py`: parse/compare, prerelease rules, constraint set (`==`, `>=`, `^`, `~`, bare minimum). Property-test against the SemVer spec cases.
+2. `manifest.py`: `tomllib` read + validation (name regex, semver, `[lib]`/`[[bin]]` exclusivity, path-dep detection); `tomlkit` write preserving comments.
+3. `lockfile.py`: deterministic TOML emit/parse; round-trip stability.
+4. `pme init` scaffolding (click subcommand).
+
+*Gate:* round-trip parse/write stable; `pme init` scaffolds a valid project; Hypothesis finds no semver parse/compare bugs.
+
+**M2 — MVS resolver**
+1. Implement §4's fixed-point over an in-memory index (`name → sorted versions + deps`).
+2. Encode the failure cases (`E_RESOLVE_NOT_FOUND`, `NO_VERSION`, `MAJOR_CONFLICT`, `COMPILER`) in the §8 shape.
+3. Property-test against a brute-force checker; golden tests for `why` paths.
+
+*Gate:* resolves against the fake index; conflict messages print both dependency paths.
+
+**M3 — store + build (path deps, offline)** — see `BUILD.md` B1–B5
+1. `store.py`: content-addressed layout, atomic extract (tmp+rename), sha256 verify, flock.
+2. `plan.py` + `build.py`: plan + `emeraldc` exec + diagnostics passthrough.
+3. `fingerprint.py`: no-op detection.
+
+*Gate:* a two-package path-dep project builds and runs; a second build is a no-op.
+
+**M4 — registry reads**
+1. `registry.py` §7.4: `GET index`, `GET tarball`, verify, extract.
+2. `pme add`/`remove` (manifest edit + re-resolve), `install [--locked]`, `tree`, `why`.
+
+*Gate:* `pme add strings` from a local stub index resolves, downloads, extracts, locks; `install --locked` fails on drift.
+
+**M5 — registry writes**
+1. Reproducible tarball builder (sorted entries, fixed mtime/uid/gid/mode) + `.pmeignore`.
+2. `pme publish` validation (name/semver/license/no-path-deps/`[lib]`, no `a/b.rald`+`a.b.rald` ambiguity) + dry-run compile.
+3. `pme login`/`yank`; Stage-1 NDJSON index (git repo + HTTPS).
+
+*Gate:* publish produces byte-identical tarballs across runs; re-publish of an existing version is rejected; a yanked version stays downloadable but unselectable.
+
+**M6 — polish**
+1. `pme test` (compile+run `tests/*.rald`, §9), `pme update`, `pme verify`, `--json` everywhere.
+2. Docs + `target/build-plan.json` hand-off to `emerald-lsp` (§12 Q3).
+
+*Gate:* full CLI surface green on path and registry deps; every command accepts `--json`/`-q`; exit codes match §6.
+
+Read the matching entries in `REFERENCES.md` before each step.
 
 ---
 
