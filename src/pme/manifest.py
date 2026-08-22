@@ -93,6 +93,8 @@ def load_manifest(path: str | Path = "emerald.toml") -> Manifest:
         if not isinstance(target_name, str) or not NAME_RE.fullmatch(target_name):
             raise ManifestError(f"invalid binary name `{target_name}`", "E_MANIFEST_NAME", str(path))
         bins.append(BinTarget(target_name, Path(entry)))
+    if len({target.name for target in bins}) != len(bins):
+        raise ManifestError("binary target names must be unique", "E_MANIFEST_NAME", str(path))
     lib = None
     if raw_lib is not None:
         if not isinstance(raw_lib, dict) or not isinstance(raw_lib.get("root"), str):

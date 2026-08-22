@@ -1,7 +1,7 @@
 # pme — the Build System
 
-**Status:** design. No build code exists yet; this document is the spec for the
-build-system half of pme, plus its implementation route. The package-manager
+**Status:** initial implementation. This document is the spec for the
+build-system half of pme and its remaining upstream-dependent work. The package-manager
 half is `DESIGN.md`; prior art for everything here is `REFERENCES.md`.
 
 pme is *two* tools with one seam:

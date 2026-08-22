@@ -41,11 +41,11 @@ class Resolution:
             return []
         paths: list[list[str]] = []
         def walk(node: str, suffix: list[str]) -> None:
-            parents = self.parents.get(node) or {root}
+            parents = self.parents.get(node) or {"root"}
             for parent in sorted(parents):
-                if parent == root:
-                    paths.append([root, *reversed(suffix), node])
-                elif parent not in suffix:
+                if parent == "root":
+                    paths.append([root, node, *suffix])
+                elif parent not in suffix and parent != node:
                     walk(parent, [node, *suffix])
         walk(package, [])
         return paths

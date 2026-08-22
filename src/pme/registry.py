@@ -47,3 +47,21 @@ class Registry:
             return response.content
         except httpx.HTTPError as exc:
             raise PmeError(f"failed to download package: {exc}", "E_REGISTRY_DOWNLOAD", "registry", exit_code=3) from exc
+
+    def publish(self, metadata: dict[str, object], archive: bytes, token: str) -> None:
+        try:
+            response = self.client.post(f"{self.base_url}/publish", headers={"Authorization": f"Bearer {token}"},
+                                        data={"metadata": json.dumps(metadata, separators=(",", ":"))},
+                                        files={"package": (f"{metadata['name']}-{metadata['version']}.tar.gz", archive,
+                                                           "application/gzip")})
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise PmeError(f"failed to publish package: {exc}", "E_REGISTRY_PUBLISH", "registry", exit_code=3) from exc
+
+    def yank(self, name: str, version: Version, token: str) -> None:
+        try:
+            response = self.client.post(f"{self.base_url}/yank", headers={"Authorization": f"Bearer {token}"},
+                                        json={"name": name, "version": str(version)})
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise PmeError(f"failed to yank package: {exc}", "E_REGISTRY_YANK", "registry", exit_code=3) from exc

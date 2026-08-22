@@ -15,3 +15,12 @@ def test_mvs_raises_transitive_minimum():
     })
     result = resolve({"a": "1.0.0", "b": "1.0.0"}, index)
     assert result.packages["c"].version == Version.parse("1.2.0")
+
+
+def test_paths_to_reports_root_to_dependency():
+    index = MemoryIndex({
+        "a": [release("a", "1.0.0", {"b": "1.0.0"})],
+        "b": [release("b", "1.0.0")],
+    })
+    result = resolve({"a": "1.0.0"}, index)
+    assert result.paths_to("b", "app") == [["app", "a", "b"]]

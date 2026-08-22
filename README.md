@@ -15,10 +15,10 @@ pme is two tools with one seam:
 
 Prior art for both is collected in [`REFERENCES.md`](REFERENCES.md).
 
-**Status:** core package-management implementation. Manifests, strict semver,
-MVS resolution, deterministic lockfiles, registry reads, checksum-verified atomic
-store extraction, and the `init`/`add`/`remove`/`install`/`tree`/`verify` CLI are
-implemented. Build driving and registry publishing remain planned. Its one hard
+**Status:** initial end-to-end implementation. Package resolution, verified storage,
+incremental build driving, run/test/check modes, dependency inspection and updates,
+reproducible publishing, authentication, and yanking are implemented. Remote-cache
+and upstream-dependent per-module compilation remain future work. Its one hard
 prerequisite — the Emerald module system — shipped at `emerald@1f683be` and
 is still exactly as it shipped: this document tracks the compiler at
 `emerald@1facafe` (HEAD, 2026-08-17), and everything upstream landed since —
@@ -88,10 +88,10 @@ expanded from the pme spec's §10–§11. Milestones:
 | 0 | imports in emerald (`-I` contract frozen) | ✅ done — re-verified at `emerald@1facafe` |
 | 1 | manifest + lockfile + semver | ✅ done |
 | 2 | MVS resolver | ✅ done |
-| 3 | store + build (path deps only, no network) | — |
-| 4 | registry reads (`add` / `install` / `tree` / `why`) | partial (`why` pending) |
-| 5 | registry writes (reproducible tarball, `publish`, Stage-1 index) | — |
-| 6 | polish (`test`, `update`, `--json` everywhere, docs) | — |
+| 3 | store + build (path deps only, no network) | ✅ done |
+| 4 | registry reads (`add` / `install` / `tree` / `why`) | ✅ done |
+| 5 | registry writes (reproducible tarball, `publish`, Stage-1 index) | ✅ client done |
+| 6 | polish (`test`, `update`, `--json` everywhere, docs) | ✅ initial pass |
 
 Milestone 3 is the first genuinely useful build: it needs no registry at all —
 `path` dependencies alone prove the whole `-I` pipeline end to end.

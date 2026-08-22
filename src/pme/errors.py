@@ -33,3 +33,8 @@ class ManifestError(PmeError):
 class ResolveError(PmeError):
     def __init__(self, message: str, code: str, notes: list[dict[str, str]] | None = None):
         super().__init__(message, code, "resolve", "emerald.toml", notes or [])
+
+
+class BuildError(PmeError):
+    def __init__(self, message: str, code: str = "E_BUILD", file: str | None = None):
+        super().__init__(message, code, "build", file)
